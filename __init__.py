@@ -4,14 +4,16 @@
 支持实时天气和天气预报查询。
 """
 
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict
 
 import httpx
-from pydantic import Field
-
 from nekro_agent.api.schemas import AgentCtx
 from nekro_agent.core import logger
 from nekro_agent.services.plugin.base import ConfigBase, NekroPlugin, SandboxMethodType
+from pydantic import Field
+
+if TYPE_CHECKING:
+    from nekro_agent.services.plugin.base import PluginConfigType
 
 # 插件元信息
 plugin = NekroPlugin(
@@ -27,16 +29,13 @@ plugin = NekroPlugin(
 # 插件配置
 @plugin.mount_config()
 class WeatherConfig(ConfigBase):
-    """天气查询配置"""
+    """天气查询插件配置"""
 
     API_KEY: str = Field(
         default="",
         title="高德地图 API Key",
         description="在高德开放平台申请的应用 API Key",
-        json_schema_extra={
-            "is_secret": True,
-            "required": True,
-        },
+        json_schema_extra={"is_secret": True},
     )
 
     API_BASE_URL: str = Field(
@@ -56,8 +55,8 @@ class WeatherConfig(ConfigBase):
 config: WeatherConfig = plugin.get_config(WeatherConfig)
 
 
-async def get_weather_from_amap(city: str) -> Optional[Dict]:
-    """从高德地图获取天气信息
+async def _get_weather_from_amap(city: str) -> Dict[str, Any] | None:
+    """从高德地图获取天气信息。
 
     Args:
         city: 城市名称
@@ -67,14 +66,11 @@ async def get_weather_from_amap(city: str) -> Optional[Dict]:
     """
     try:
         async with httpx.AsyncClient(timeout=config.TIMEOUT) as client:
-            # 先获取城市编码
+            # 获取城市编码
             geo_url = f"{config.API_BASE_URL}/geocode/geo"
             geo_response = await client.get(
                 geo_url,
-                params={
-                    "key": config.API_KEY,
-                    "address": city,
-                }
+                params={"key": config.API_KEY, "address": city},
             )
             geo_response.raise_for_status()
             geo_data = geo_response.json()
@@ -89,11 +85,7 @@ async def get_weather_from_amap(city: str) -> Optional[Dict]:
             weather_url = f"{config.API_BASE_URL}/weather/weatherInfo"
             weather_response = await client.get(
                 weather_url,
-                params={
-                    "key": config.API_KEY,
-                    "city": city_code,
-                    "extensions": "all",  # 获取预报天气
-                }
+                params={"key": config.API_KEY, "city": city_code, "extensions": "all"},
             )
             weather_response.raise_for_status()
             weather_data = weather_response.json()
@@ -107,24 +99,26 @@ async def get_weather_from_amap(city: str) -> Optional[Dict]:
                 "forecasts": weather_data.get("forecasts", []),
             }
 
+    except httpx.RequestError as e:
+        logger.error(f"请求高德 API 失败: {e}")
+        return None
     except Exception as e:
-        logger.error(f"获取天气信息失败: {e}")
+        logger.error(f"获取天气信息时发生错误: {e}")
         return None
 
 
-def format_weather_result(data: Dict, forecast: bool = False) -> str:
-    """格式化天气结果
+def _format_weather_result(data: Dict[str, Any], include_forecast: bool = False) -> str:
+    """格式化天气结果。
 
     Args:
         data: 天气数据
-        forecast: 是否包含预报
+        include_forecast: 是否包含预报
 
     Returns:
         格式化的天气字符串
     """
     city = data.get("city", "未知")
     lives = data.get("lives", [])
-    forecasts = data.get("forecasts", [])
 
     if not lives:
         return f"无法获取 {city} 的天气信息"
@@ -141,22 +135,24 @@ def format_weather_result(data: Dict, forecast: bool = False) -> str:
     ]
 
     # 添加预报信息
-    if forecast and forecasts:
-        forecast_data = forecasts[0]
-        casts = forecast_data.get("casts", [])
-        if casts:
-            result.append("\n📅 天气预报:")
-            for i, cast in enumerate(casts[:3], 1):
-                date = cast.get("date", "")
-                week = cast.get("week", "")
-                day_weather = cast.get("dayweather", "")
-                night_weather = cast.get("nightweather", "")
-                day_temp = cast.get("daytemp", "")
-                night_temp = cast.get("nighttemp", "")
+    if include_forecast:
+        forecasts = data.get("forecasts", [])
+        if forecasts:
+            forecast_data = forecasts[0]
+            casts = forecast_data.get("casts", [])
+            if casts:
+                result.append("\n📅 天气预报:")
+                for _i, cast in enumerate(casts[:3], 1):
+                    date = cast.get("date", "")
+                    week = cast.get("week", "")
+                    day_weather = cast.get("dayweather", "")
+                    night_weather = cast.get("nightweather", "")
+                    day_temp = cast.get("daytemp", "")
+                    night_temp = cast.get("nighttemp", "")
 
-                result.append(
-                    f"  {date} (周{week}): ☀️{day_weather} {day_temp}°C / 🌙{night_weather} {night_temp}°C"
-                )
+                    result.append(
+                        f"  {date} (周{week}): ☀️{day_weather} {day_temp}°C / 🌙{night_weather} {night_temp}°C",
+                    )
 
     return "\n".join(result)
 
@@ -164,16 +160,17 @@ def format_weather_result(data: Dict, forecast: bool = False) -> str:
 @plugin.mount_sandbox_method(
     SandboxMethodType.AGENT,
     name="查询实时天气",
-    description="查询指定城市的实时天气信息，包括温度、湿度、风力等"
+    description="查询指定城市的实时天气信息，包括温度、湿度、风力等",
 )
 async def query_weather(_ctx: AgentCtx, city: str) -> str:
-    """查询指定城市的实时天气
+    """查询指定城市的实时天气。
 
     Args:
-        city: 城市名称，例如 "北京"、"上海"
+        _ctx: Agent 上下文
+        city: 城市名称
 
     Returns:
-        str: 格式化的天气信息，查询失败返回错误信息
+        格式化的天气信息，查询失败返回错误信息
     """
     if not city or not city.strip():
         return "请提供有效的城市名称"
@@ -181,13 +178,13 @@ async def query_weather(_ctx: AgentCtx, city: str) -> str:
     logger.info(f"查询城市天气: {city}")
 
     # 获取天气数据
-    weather_data = await get_weather_from_amap(city.strip())
+    weather_data = await _get_weather_from_amap(city.strip())
 
     if not weather_data:
         return f"❌ 无法获取 {city} 的天气信息\n可能的原因:\n- 城市名称不正确\n- API Key 无效\n- 网络连接问题"
 
     # 格式化并返回结果
-    result = format_weather_result(weather_data, forecast=False)
+    result = _format_weather_result(weather_data, include_forecast=False)
 
     logger.info(f"成功获取 {city} 天气信息")
     return result
@@ -196,17 +193,18 @@ async def query_weather(_ctx: AgentCtx, city: str) -> str:
 @plugin.mount_sandbox_method(
     SandboxMethodType.AGENT,
     name="查询天气预报",
-    description="查询指定城市未来几天的天气预报"
+    description="查询指定城市未来几天的天气预报",
 )
 async def query_weather_forecast(_ctx: AgentCtx, city: str, days: int = 3) -> str:
-    """查询指定城市的天气预报
+    """查询指定城市的天气预报。
 
     Args:
+        _ctx: Agent 上下文
         city: 城市名称
         days: 预报天数，默认3天，最多7天
 
     Returns:
-        str: 格式化的天气预报信息
+        格式化的天气预报信息
     """
     if not city or not city.strip():
         return "请提供有效的城市名称"
@@ -216,19 +214,22 @@ async def query_weather_forecast(_ctx: AgentCtx, city: str, days: int = 3) -> st
     logger.info(f"查询城市天气预报: {city}, {days}天")
 
     # 获取天气数据（包含预报）
-    weather_data = await get_weather_from_amap(city.strip())
+    weather_data = await _get_weather_from_amap(city.strip())
 
     if not weather_data:
         return f"❌ 无法获取 {city} 的天气信息"
 
     # 格式化并返回结果（包含预报）
-    result = format_weather_result(weather_data, forecast=True)
+    result = _format_weather_result(weather_data, include_forecast=True)
 
     logger.info(f"成功获取 {city} 天气预报")
     return result
 
 
 @plugin.mount_cleanup_method()
-async def clean_up():
+async def _clean_up() -> None:
     """清理插件资源"""
     logger.info("天气查询插件已清理")
+
+
+__all__ = ["config", "plugin", "query_weather", "query_weather_forecast"]
